@@ -75,7 +75,7 @@ trend_design <- svydesign(
 # --- 5. STREAMLINED ANALYSIS ---
 get_prev <- function(formula, design, name) {
   svyby(formula, ~NHANES_cycle + Age_group, design, svymean, na.rm = TRUE) %>%
-    rename(prev = 3) %>% # Third column is the mean
+    rename(prev = 3) %>% 
     mutate(Metric = name, pct = prev * 100, se_pct = se * 100)
 }
 
