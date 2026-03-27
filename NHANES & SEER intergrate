@@ -72,7 +72,7 @@ trend_design <- svydesign(
   nest = TRUE, data = all_data
 )
 
-# --- 5. STREAMLINED ANALYSIS ---
+# --- Analysis ---
 get_prev <- function(formula, design, name) {
   svyby(formula, ~NHANES_cycle + Age_group, design, svymean, na.rm = TRUE) %>%
     rename(prev = 3) %>% 
