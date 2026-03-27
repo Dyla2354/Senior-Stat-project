@@ -1,0 +1,458 @@
+library(MASS)
+library(tidyverse)
+library(nhanesA)
+library(survey)
+library(scales)
+library(corrplot)
+library(broom)
+library(ggeffects)
+
+# --- 1. CONFIGURATION ---
+# Define cycles and labels in one place
+cycles <- list(
+  suffix = c("E", "F", "G", "H", "I", "P","L"),
+  label  = c("2007-2008", "2009-2010", "2011-2012", "2013-2014", "2015-2016", "2017-2020", "2021-2023")
+)
+
+# --- 2. OPTIMIZED FETCH FUNCTION ---
+fetch_nhanes_cleaned <- function(s, label) {
+  prefix <- if(s == "P") "P_" else ""
+  suffix <- if(s == "P") "" else paste0("_", s)
+  
+  # 1. Download tables
+  demo_raw <- nhanes(paste0(prefix, "DEMO", suffix))
+  bmx_raw  <- nhanes(paste0(prefix, "BMX", suffix))
+  paq_raw  <- nhanes(paste0(prefix, "PAQ", suffix))
+  
+  if (any(sapply(list(demo_raw, bmx_raw, paq_raw), is.null))) return(NULL)
+  
+  # 2. Identify which weight column 
+  weight_col <- intersect(c("WTMEC2YR", "WTMECPRP"), names(demo_raw))
+  
+  # 3. Join and Clean
+  df <- demo_raw %>%
+    dplyr::select(SEQN, any_of(weight_col), SDMVSTRA, SDMVPSU, RIDAGEYR) %>%
+    inner_join(dplyr::select(bmx_raw, SEQN, BMXBMI), by = "SEQN") %>%
+    inner_join(dplyr::select(paq_raw, SEQN, PAD680), by = "SEQN") %>%
+    rename(raw_weight = !!weight_col) %>% 
+    mutate(
+      NHANES_cycle = label,
+      is_obese = as.numeric(BMXBMI >= 30),
+      is_high_sedentary = case_when(
+        PAD680 > 480 & PAD680 < 7777 ~ 1,
+        PAD680 <= 480                ~ 0,
+        TRUE                         ~ NA_real_
+      ),
+      Age_group = case_when(
+        RIDAGEYR < 40 ~ "<40",
+        RIDAGEYR >= 40 & RIDAGEYR <= 44 ~ "40-44",
+        RIDAGEYR >= 45 & RIDAGEYR <= 49 ~ "45-49",
+        RIDAGEYR >= 50 ~ "50+",
+        TRUE ~ "Other"
+      )
+    ) %>%
+    filter(Age_group != "Other")
+  
+  return(df)
+}
+
+# --- 3. EXECUTION & DESIGN ---
+all_data <- map2_dfr(cycles$suffix, cycles$label, fetch_nhanes_cleaned) %>%
+  mutate( 
+    NHANES_cycle = if_else(NHANES_cycle == "2021-2023", "2021-2022", NHANES_cycle),
+    cycle_num = as.numeric(factor(NHANES_cycle, levels = c("2007-2008", "2009-2010", "2011-2012", 
+                                                           "2013-2014", "2015-2016", "2017-2020", 
+                                                           "2021-2022"))),
+    adj_weight = raw_weight / length(unique(NHANES_cycle))
+  )
+
+#--- Single Survey Design Object
+trend_design <- svydesign(
+  id = ~SDMVPSU, strata = ~SDMVSTRA, weights = ~adj_weight, 
+  nest = TRUE, data = all_data
+)
+
+# --- 5. STREAMLINED ANALYSIS ---
+get_prev <- function(formula, design, name) {
+  svyby(formula, ~NHANES_cycle + Age_group, design, svymean, na.rm = TRUE) %>%
+    rename(prev = 3) %>% # Third column is the mean
+    mutate(Metric = name, pct = prev * 100, se_pct = se * 100)
+}
+
+plot_data <- bind_rows(
+  get_prev(~is_obese, trend_design, "Obesity"),
+  get_prev(~is_high_sedentary, trend_design, "High Sedentary")
+)
+
+ggplot(plot_data, aes(x = NHANES_cycle, y = pct, color = Age_group, group = Age_group)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = pct - (1.96 * se_pct), ymax = pct + (1.96 * se_pct)), width = 0.2) +
+  facet_wrap(~Metric, scales = "free_y", ncol = 1) +
+  theme_minimal() +
+  labs(
+    title = "Long-term Health Trends: NHANES 2007-2023",
+    subtitle = "Analysis of Obesity and Sedentary Behavior in Adults under 50",
+    x = "Survey Cycle",
+    y = "Estimated Prevalence (%)",
+    color = "Age Group"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+## ---- Regression model----- 
+all_data <- all_data %>%
+  mutate(NHANES_cycle = if_else(NHANES_cycle == "2021-2023", "2021-2022", NHANES_cycle),
+         cycle_num = as.numeric(factor(NHANES_cycle, levels = c("2007-2008", "2009-2010", "2011-2012", 
+                                                                "2013-2014", "2015-2016", "2017-2020", 
+                                                                "2021-2022"))))
+
+options(survey.lonely.psu = "adjust")
+
+trend_design_final <- svydesign(
+  id = ~SDMVPSU, 
+  strata = ~SDMVSTRA, 
+  weights = ~adj_weight, 
+  nest = TRUE, 
+  data = all_data
+)
+
+# Adjusted Logistic Regression (Obesity)
+obese_mod <- svyglm(
+  is_obese ~ cycle_num * Age_group, 
+  design = trend_design_final, 
+  family = quasibinomial()
+)
+summary(obese_mod)
+# Adjusted Logistic Regression (High Sedentary)
+sedentary_mod <- svyglm(
+  is_high_sedentary ~ cycle_num * Age_group, 
+  design = trend_design_final, 
+  family = quasibinomial()
+)
+summary(sedentary_mod)
+
+
+# Generate predicted probabilities
+pred_obese <- ggpredict(obese_mod, terms = c("cycle_num", "Age_group"))%>%
+  cbind.data.frame("Metric"=c("Obese"))
+pred_sedentary <- ggpredict(sedentary_mod, terms = c("cycle_num", "Age_group"))%>%
+  cbind.data.frame("Metric"=c("Sedentary"))
+
+combined_trends <- bind_rows(pred_obese, pred_sedentary) %>%
+  filter(group != "Other")
+
+# Plotting the adjusted trend
+updated_labels <- cycles$label
+updated_labels[updated_labels == "2021-2023"] <- "2021-2022"
+
+ggplot(combined_trends, aes(x = x, y = predicted, color = group, fill = group)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.15, color = NA) + 
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  
+  facet_wrap(~Metric) +
+  
+  scale_x_continuous(breaks = 1:7, labels = updated_labels) +
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, NA)) +
+  
+  scale_color_manual(values = c("#E69F00", "#56B4E9","#9932CC", "#009E73" )) +
+  scale_fill_manual(values = c("#E69F00", "#56B4E9","#9932CC","#009E73")) +
+
+  theme_minimal() +
+  labs(
+    title = "U.S. Health Trends by Age Group (2007-2023*)",
+    subtitle = "Modeled Predicted Probabilities from NHANES Survey Data",
+    x = "Survey Cycle",
+    y = "Predicted Probability (%)",
+    color = "Age Group",
+    fill = "Age Group"
+  ) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+
+###-----SEER -------------------------
+
+raw_data <- read.csv("data2000.csv")  # Open file chooser to load CSV
+data <- raw_data                     # Make a working copy
+summary(data)  
+head(data)                           # Quick check of the first few rows
+ 
+
+# --------------------------------------------------------
+# 1. Filter and Prepare Data (2007-2023)
+# --------------------------------------------------------
+df_clean <- data %>%
+  filter(Year.of.diagnosis >= 2007 & Year.of.diagnosis <= 2023) %>%
+  rename(Age_range = `Age.recode.with..1.year.olds.and.90.`)%>%
+  mutate(
+    Start_Year = Year.of.diagnosis - (Year.of.diagnosis - 2007) %% 2,
+    NHANES_cycle = paste0(Start_Year, "-", Start_Year + 1),
+    Age_range = gsub(" years", "", Age_range),
+    Age_group = case_when(
+      Age_range < 40  ~ "<40",
+      Age_range >= 40 & Age_range <= 44 ~ "40-44",
+      Age_range >= 45 & Age_range <= 49 ~ "45-49",
+      Age_range >= 50 ~ "50+",
+      TRUE ~ NA_character_),
+    Age_group = factor(Age_group, levels = c("<40", "40-44", "45-49", "50+")))
+
+# --------------------------------------------------------
+# 3. Calculate Proportions and Counts
+# --------------------------------------------------------
+cycle_summary <- df_clean %>%
+  group_by(NHANES_cycle, Start_Year, Age_group) %>%
+  summarise(Cases = n(), .groups = "drop") %>%
+  group_by(NHANES_cycle) %>%
+  mutate(
+    Total_Cycle_Cases = sum(Cases),
+    Proportion = Cases / Total_Cycle_Cases
+  )
+
+# --------------------------------------------------------
+# 4. Visualization: Trends by the 4 Age Groups
+# --------------------------------------------------------
+cycle_summary_faceted <- cycle_summary %>%
+  mutate(Plot_Group = ifelse(Age_group == "50+", "Older Cohort (50+)", "Younger Cohorts (<50)"))
+
+#Plot proportion
+ggplot(cycle_summary_faceted, aes(x = NHANES_cycle, y = Proportion, group = Age_group, color = Age_group)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  # 'scales = "free_y"' is crucial so the <50 trends aren't flattened by the 50+ scale
+  facet_wrap(~ Plot_Group, scales = "free_y", ncol = 1) + 
+  scale_y_continuous(labels = percent) +
+  theme_minimal() +
+  labs(
+    title = "Colorectal Cancer Proportion Trends (2007-2020)",
+    subtitle = "Faceted by Age Cohort (Note different Y-axis scales)",
+    x = "NHANES Cycle", 
+    y = "Proportion of Total Cases",
+    color = "Age Group"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold", size = 12) # Makes facet titles pop
+  )
+
+# Actual cases
+ggplot(cycle_summary_faceted, aes(x = NHANES_cycle, y = Cases, group = Age_group, color = Age_group)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  # 'free_y' allows the 50+ and <50 groups to have their own Y-axis scales
+  facet_wrap(~ Plot_Group, scales = "free_y", ncol = 1) + 
+  scale_y_continuous(labels = label_comma()) + # Formats numbers with commas (e.g., 10,000)
+  theme_minimal() +
+  labs(
+    title = "Total Number of Colorectal Cancer Cases (2007-2020)",
+    subtitle = "Trends in raw counts by age cohort",
+    x = "NHANES Cycle", 
+    y = "Total Number of Cases",
+    color = "Age Group"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold", size = 12)
+  )
+
+
+# --------------------------------------------------------
+# 5. Statistical Analysis: Negative Binomial Regression
+# --------------------------------------------------------
+# We focus on cases < 50 (the three younger groups combined)
+nb_data <- cycle_summary %>%
+  filter(Age_group != "50+") %>%
+  group_by(Start_Year) %>%
+  summarise(Young_Cases = sum(Cases), Total_Cases = sum(Total_Cycle_Cases))
+
+# Negative Binomial Model
+# Using log(Total_Cases) as an offset to model the RATE of occurrence
+nb_model <- glm.nb(Young_Cases ~ Start_Year + offset(log(Total_Cases)), data = nb_data)
+
+summary(nb_model)
+
+###------------- Combined insights-----
+
+## SEER Data
+
+# Create the new 2017-2020 data frame
+df_SE <- cycle_summary %>%
+  filter(NHANES_cycle %in% c("2017-2018", "2019-2020")) %>%
+  group_by(Age_group) %>%
+  summarise(
+    NHANES_cycle = "2017-2020",
+    Start_Year = 2017,
+    Cases = sum(Cases, na.rm = TRUE),
+    Total_Cycle_Cases = sum(unique(Total_Cycle_Cases)),
+    Proportion = Cases / Total_Cycle_Cases
+  )%>% 
+  dplyr::select(NHANES_cycle, Start_Year, Age_group, Cases, Total_Cycle_Cases, Proportion)
+
+cycle_summary <- cycle_summary %>%
+  filter(!NHANES_cycle %in% c("2017-2018", "2019-2020")) %>%
+  dplyr::select(!Start_Year)
+
+df_SE <- bind_rows(df_SE, cycle_summary) %>%
+  arrange(Start_Year, Age_group) %>%
+  dplyr::select(!Start_Year)
+
+##--- NHANES data ----
+
+obese_df <- get_prev(~is_obese, trend_design, "Obesity")
+sedentary_df <- get_prev(~is_high_sedentary, trend_design, "High Sedentary")
+
+df_combined <- full_join(
+  obese_df, 
+  sedentary_df,
+  by = c("NHANES_cycle", "Age_group"),
+  suffix = c("_obese", "_sedentary")
+)
+
+### Joined data
+df_NHSE<-full_join(
+  df_combined,
+  df_SE,
+  by=c("NHANES_cycle", "Age_group"))
+
+df_NHSE <- df_NHSE %>%
+  mutate(
+    pct_obese = prev_obese * 100,
+    pct_sedentary = prev_sedentary * 100,
+    No_of_cancer = Cases/100
+  )
+
+
+####
+
+df_long <- df_NHSE %>%
+  pivot_longer(
+    cols = c(pct_obese, pct_sedentary, No_of_cancer),
+    names_to = "Metric",
+    values_to = "Number"
+  ) %>%
+ mutate(Metric = case_when(
+    Metric == "pct_obese" ~ "Obesity (%)",
+    Metric == "pct_sedentary" ~ "High Sedentary (%)",
+    Metric == "No_of_cancer" ~ "Cases (100)"
+  ))
+
+#Trends in Obesity, Level of Sedentary & Cancer by Age groups
+ggplot(df_long, aes(x = NHANES_cycle, y = Number, color = Metric, group = Metric)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~Age_group, ncol = 2) +  # Creates a panel for each age group
+  theme_minimal() +
+  labs(
+    title = "Trends in Obesity, Level of Sedentary, and Cancer by Age Group",
+    x = "NHANES Cycle (Years)",
+    y = "Hundres cases of Cancer",
+    color = "Health Metric"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  )
+
+
+### Correlation Heatmap
+numeric_cols <- df_NHSE[, c("pct_obese", "pct_sedentary", "No_of_cancer")]
+
+cor_matrix <- cor(numeric_cols, use = "complete.obs")
+
+corrplot(cor_matrix, method = "color", addCoef.col = "black")
+
+### Check correlation between variables specifically for each age group
+df_NHSE %>%
+  group_by(Age_group) %>%
+  summarise(
+    Obesity_Cancer_Corr = cor(pct_obese, No_of_cancer),
+    Sedentary_Cancer_Corr = cor(pct_sedentary, No_of_cancer)
+  )
+
+### Interactions across Age Groups
+ggplot(df_NHSE, aes(x = pct_obese, y = No_of_cancer, color = pct_sedentary)) +
+  geom_point() +
+  facet_wrap(~Age_group) + 
+  scale_color_viridis_c() +
+  theme_bw() +
+  labs(title = "Interaction by Age Group")
+
+### Age <50
+df_young <- df_NHSE %>% filter(Age_group != "50+")
+
+sub_fit <- lm(No_of_cancer ~ pct_obese + pct_sedentary + Age_group, data = df_young)
+
+summary(sub_fit)
+
+
+# Extract coefficients and confidence intervals into a data frame
+model_results <- tidy(sub_fit, conf.int = TRUE) %>%
+  filter(term != "(Intercept)") 
+
+# Coefficient Plot
+model_results$term <- c("Obesity (%)", "High Sedentary (%)","Age: 40-44", "Age: 45-49")
+ggplot(model_results, aes(x = estimate, y = term)) +
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed") + # The 'Zero Effect' line
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2, color = "royalblue") +
+  geom_point(size = 3, color = "royalblue") +
+  theme_minimal() +
+  labs(
+    title = "Predictors of Cancer Proportion (Age < 50)",
+    subtitle = "Points to the right of red line show a positive increase in risk",
+    x = "Regression Coefficient (Effect Size)",
+    y = "Predictor Variable"
+  ) +
+  theme(axis.text.y = element_text(face = "bold"))
+
+
+### Regression Trends (Age < 50)
+sub_data <- df_young %>% 
+    mutate(Age_group = factor(Age_group, levels = c("<40", "40-44", "45-49")))
+
+# Trend Plot
+ggplot(sub_data, aes(x = pct_obese, y = No_of_cancer, color = Age_group)) +
+  geom_point(size = 3, alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, size = 1.2) +
+  scale_color_viridis_d(option = "D") + # Professional color scale
+  theme_minimal() +
+  labs(
+    title = "Obesity vs. Cancer Proportion (Ages < 50)",
+    subtitle = "Positive slopes indicate that higher obesity correlates with higher cases of cancer",
+    x = "Obesity Percentage (%)",
+    y = "Hundres cases of cancer",
+    color = "Age Group"
+  ) +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+# Correlation Heatmap
+numeric_cols <- df_young[, c("pct_obese", "pct_sedentary", "No_of_cancer")]
+
+cor_matrix <- cor(numeric_cols, use = "complete.obs")
+
+corrplot(cor_matrix, method = "color", addCoef.col = "black")
+
+### Cancer cases vs. Obesity & Sedentary level
+plot_data <- sub_data %>%
+  mutate(Activity_Level = ifelse(pct_sedentary > median(pct_sedentary, na.rm = TRUE), 
+                                 "More sedentary", "Lesser sedentary"))
+
+ggplot(plot_data, aes(x = pct_obese, y = No_of_cancer, color = Age_group)) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 1.2) +
+  facet_wrap(~Activity_Level) +
+  scale_color_viridis_d(option = "D") +
+  theme_minimal() +
+  labs(
+    title = "Cancer Risk Factors: Obesity and Sedentary",
+    subtitle = "Panels = Sedentary Level",
+    x = "Obesity Percentage (%)",
+    y = "Hundres Cases of Caner",
+    color = "Age Group"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 12) 
+  )
