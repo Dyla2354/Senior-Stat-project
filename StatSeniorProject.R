@@ -737,6 +737,66 @@ ggplot(under50_prop_17, aes(x = Start_Year, y = Proportion_Under50)) +
 # - Confidence interval (shaded area) shows uncertainty around trend estimate.
 # - Slope indicates rate of change in proportion under 50 per year.
 
+# Plot with two regression lines broken at 2014
+proportion_under50_17 <- proportion_under50_17 %>%
+  mutate(
+    Start_Year = as.numeric(substr(NHANES_cycle, 1, 4))
+  )
+
+pre_2014 <- proportion_under50_17 %>%
+  filter(Start_Year <= 2014)
+
+post_2014 <- proportion_under50_17 %>%
+  filter(Start_Year >= 2014)
+
+lm_pre <- lm(Proportion_Under50 ~ Start_Year, data = pre_2014)
+lm_post <- lm(Proportion_Under50 ~ Start_Year, data = post_2014)
+
+pre_2014$fit <- predict(lm_pre)
+post_2014$fit <- predict(lm_post)
+
+slope_pre <- round(coef(lm_pre)["Start_Year"], 4)
+slope_post <- round(coef(lm_post)["Start_Year"], 4)
+
+ggplot(proportion_under50_17, aes(x = Start_Year, y = Proportion_Under50)) +
+  
+  # raw data
+  geom_point(size = 2) +
+  geom_line(alpha = 0.6) +
+  
+  # pre-2014 model
+  geom_line(
+    data = pre_2014,
+    aes(y = fit),
+    size = 1.2
+  ) +
+  
+  # post-2014 model
+  geom_line(
+    data = post_2014,
+    aes(y = fit),
+    size = 1.2,
+    linetype = "dashed"
+  ) +
+  
+  # breakpoint
+  geom_vline(xintercept = 2014, linetype = "dotted") +
+  
+  labs(
+    title = "Proportion of CRC Cases Under Age 50 Over Time",
+    subtitle = "Piecewise Linear Trends (Pre-2014 vs Post-2014)",
+    x = "Year",
+    y = "Proportion Under 50"
+  ) +
+  
+  theme_minimal(base_size = 14) + annotate("text", x = 2003, y = 0.10,
+                                           label = paste0("Pre-2014 slope: ", slope_pre)) +
+  annotate("text", x = 2016, y = 0.13,
+           label = paste0("Post-2014 slope: ", slope_post))
+
+coef(lm_pre)["Start_Year"]
+coef(lm_post)["Start_Year"]
+
 # Polynomial Trend
 pm_fit_12 <- lm(Proportion_Under50 ~ poly(Start_Year, 2), data = under50_prop_12)
 summary(pm_fit_12)
