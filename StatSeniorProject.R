@@ -67,6 +67,95 @@ seer_rate_data_17 %>%
   geom_line() +
   theme_minimal()
 
+# Compute Age Specific Rates
+unique(seer_rate_data_17$Age_range)
+
+seer_under50 <- seer_rate_data_17 %>%
+  filter(Age_range %in% std_pop$Age_range)
+
+seer_under50 <- seer_under50 %>%
+  mutate(age_specific_rate = (Cases / Population) * 100000)
+
+
+std_pop <- data.frame(
+  Age_range = c("20-24","25-29","30-34","35-39","40-44","45-49"),
+  weight = c(
+    0.066,  # 20–24
+    0.064,  # 25–29
+    0.071,  # 30–34
+    0.081,  # 35–39
+    0.082,  # 40–44
+    0.072   # 45–49
+  )
+) # These numbers come from the 2000 US standard population, which is the SEER standard
+
+# Alignment Check
+setdiff(seer_under50$Age_range, std_pop$Age_range)
+setdiff(std_pop$Age_range, seer_under50$Age_range)
+
+# Merge Weights
+seer_under50 <- seer_under50 %>%
+  left_join(std_pop, by = "Age_range")
+
+# Age-adjusted rates
+age_adjusted_rates <- seer_under50 %>%
+  group_by(Year) %>%
+  summarise(
+    age_adjusted_rate = sum(age_specific_rate * weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Fit APC Model
+apc_model <- lm(log(age_adjusted_rate) ~ Year, data = age_adjusted_rates)
+summary(apc_model)
+
+# Extract APC + 95% CI
+beta <- coef(apc_model)["Year"]
+
+APC <- (exp(beta) - 1) * 100
+
+conf <- confint(apc_model)["Year", ]
+
+APC_lower <- (exp(conf[1]) - 1) * 100
+APC_upper <- (exp(conf[2]) - 1) * 100
+
+APC
+APC_lower
+APC_upper
+
+# Create Plot
+  # Labels
+apc_label <- paste0(
+  "APC = ", round(APC, 2), "% (",
+  round(APC_lower, 2), ", ",
+  round(APC_upper, 2), ")"
+)
+
+ggplot(age_adjusted_rates, aes(x = Year, y = age_adjusted_rate)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  
+  # Optional: smooth trend (log-linear fit)
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE, linetype = "dashed") +
+  
+  annotate(
+    "text",
+    x = min(age_adjusted_rates$Year) + 2,
+    y = max(age_adjusted_rates$age_adjusted_rate),
+    label = apc_label,
+    hjust = 0,
+    size = 5
+  ) +
+  
+  labs(
+    title = "Age-Adjusted Incidence of Early-Onset Colorectal Cancer",
+    subtitle = "SEER 17 Registries, Age <50",
+    x = "Year",
+    y = "Incidence per 100,000 (Age-adjusted to 2000 U.S. standard population)"
+  ) +
+  
+  theme_minimal(base_size = 14)
+
 # ------------------------------------------------------------------------------
 # Examine frequency of each variable
 # ------------------------------------------------------------------------------
