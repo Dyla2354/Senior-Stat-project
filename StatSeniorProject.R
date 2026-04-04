@@ -1384,7 +1384,50 @@ ggplot(plot_data, aes(x = NHANES_cycle, y = pct, color = Age_group, group = Age_
 # Trend of obesity increases across all age groups. 
 # The trend seems higher in group 40 - 44 & 45- 49 maybe due to smaller sample size 
 
+### SEER data preparation before combining with NHANES ------
+data<-raw_data_17
+# 1. Filter and Prepare Data (1999-2023)
+df_clean <- data %>%
+  filter(Year.of.diagnosis >= 2001 & Year.of.diagnosis <= 2023) %>%
+  rename(Age_range = `Age.recode.with..1.year.olds.and.90.`)%>%
+  mutate(
+    Start_Year = Year.of.diagnosis - (Year.of.diagnosis - 2007) %% 2,
+    NHANES_cycle = paste0(Start_Year, "-", Start_Year + 1),
+    Age_range = gsub(" years", "", Age_range),
+    Age_group = case_when(
+      Age_range < 40  ~ "<40",
+      Age_range >= 40 & Age_range <= 44 ~ "40-44",
+      Age_range >= 45 & Age_range <= 49 ~ "45-49",
+      Age_range >= 50 ~ "50+",
+      TRUE ~ NA_character_),
+    Age_group = factor(Age_group, levels = c("<40", "40-44", "45-49", "50+")))
+
+# 2. Calculate Proportions and Counts
+cycle_summary <- df_clean %>%
+  group_by(NHANES_cycle, Start_Year, Age_group) %>%
+  summarise(Cases = n(), .groups = "drop") %>%
+  group_by(NHANES_cycle) %>%
+  mutate(
+    Total_Cycle_Cases = sum(Cases),
+    Proportion = Cases / Total_Cycle_Cases
+  )
 # Combined Insights
+## 1.Generate summary with correct survey-weighted statistics
+df_NH <- svyby(~is_obese + BMI, ~NHANES_cycle + Age_group, 
+               design = trend_design, 
+               svymean, na.rm = TRUE) %>%
+  as_tibble() %>%
+  rename(
+    prev_obese = is_obese,  
+    mean_bmi   = BMI,
+    se_obese   = se.is_obese,
+    se_bmi     = se.BMI
+  ) %>%
+  mutate(
+    prev_obese_pct = prev_obese * 100,
+    se_obese_pct   = se_obese * 100
+  )
+
 ## 1.Generate summary with correct survey-weighted statistics
 df_NH <- svyby(~is_obese + BMI, ~NHANES_cycle + Age_group, 
                design = trend_design, 
@@ -1404,7 +1447,6 @@ df_NH <- svyby(~is_obese + BMI, ~NHANES_cycle + Age_group,
 ## 2. Lag year
 lags_to_test <- c(0, 2, 4, 6) 
 
-
 df_list <- lags_to_test %>% 
   set_names(paste0("df_NHSE_lag", .)) %>% 
   map(function(lg) { 
@@ -1417,28 +1459,26 @@ df_list <- lags_to_test %>%
       unite("NHANES_cycle", y1, y2, sep = "-") %>%
       mutate(start_year = as.numeric(substr(NHANES_cycle, 1, 4))) %>%
       filter(start_year >= (1999 + lg) & start_year <= 2021) %>%
-      dplyr::select(-start_year)
+      select(-start_year)
     
     # 2b. SEER data prep (Using 'lg' to align SEER filters)
-    df_SE_agg <- age_props_group_17 %>%
+    df_SE_agg <- cycle_summary %>%
       filter(NHANES_cycle %in% c(
         paste0(2017 + lg, "-", 2018 + lg), 
         paste0(2021 + lg, "-", 2022 + lg)
       )) %>%
       group_by(Age_group) %>%
       summarise(
-        Start_Year   = 2017 + lg,
-        NHANES_cycle = paste0(Start_Year, "-", 2020 + lg),
-        Cases        = sum(n, na.rm = TRUE),
+        Start_Year        = 2017 + lg,
+        NHANES_cycle      = paste0(Start_Year, "-", 2020 + lg),
+        Cases             = sum(Cases, na.rm = TRUE),
+        Total_Cycle_Cases = sum(unique(Total_Cycle_Cases)),
+        Proportion        = Cases / Total_Cycle_Cases,
         .groups = "drop"
-      ) %>%
-      mutate(
-        Total_Cycle_Cases = sum(Cases),
-        Proportion = Cases / Total_Cycle_Cases
       )
     
     # Combine with remaining SEER cycles
-    df_SE_clean <- age_props_17 %>%
+    df_SE_clean <- cycle_summary %>%
       filter(!NHANES_cycle %in% c(
         paste0(2017 + lg, "-", 2018 + lg),
         paste0(2021 + lg, "-", 2022 + lg)
@@ -1447,7 +1487,7 @@ df_list <- lags_to_test %>%
       mutate(start_year = as.numeric(substr(NHANES_cycle, 1, 4))) %>%
       filter(start_year >= (1999 + lg)) %>%
       arrange(start_year, Age_group) %>%
-      dplyr::select(-start_year, -any_of("Start_Year"))
+      select(-start_year, -any_of("Start_Year"))
     
     # 2c. Join data set
     df_NHSE_result <- full_join(df_NH_lag, df_SE_clean, by = c("NHANES_cycle", "Age_group")) %>%
@@ -1464,10 +1504,7 @@ df_list <- lags_to_test %>%
 # Combine everything into one master data frame
 df_final_master <- bind_rows(df_list)
 
-
-
 ## 3. Trending plot
-
 df_plot <- df_final_master %>% filter(Age_group != "50+")
 
 # 3a. Corelation table
@@ -1495,8 +1532,8 @@ df_plot_long <- df_plot %>%
 
 # 3c.Plot
 ggplot(df_plot_long, aes(x = NHANES_cycle, y = Value, group = Metric, color = Metric)) +
-  geom_line(linewidth = 1) +
-  geom_point(linewidth = 2) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
   geom_text(data = df_cor_labels, 
             aes(x = x_pos, y = y_pos, label = label),
             hjust = -0.2, vjust = 1.5, 
