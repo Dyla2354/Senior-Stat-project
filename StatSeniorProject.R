@@ -6,12 +6,15 @@ library(MASS)
 library(tidyverse)
 library(nhanesA)
 library(survey)
+library(segmented)
+library(ggeffects)
+library(viridis)
 library(ggpubr)
 library(corrplot)
 library(broom)
-library(ggeffects)
-library(viridis)
-library(segmented)
+
+
+
 
 # ------------------------------------------------------------------------------
 # Load Base Data
