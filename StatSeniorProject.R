@@ -1629,6 +1629,19 @@ final_executive_table <- df_final_master %>%
 
 print(final_executive_table)
 
+
+## Forest plot
+
+ggplot(final_executive_table, aes(x = as.factor(`Lag (Years)`), y = `Obesity Beta`)) +
+  geom_point(size = 3, color = "darkblue") +
+  geom_errorbar(aes(ymin = `Lower CI`, ymax = `Upper CI`), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Effect of Obesity on Cancer Cases by Lag Year",
+       subtitle = "Error bars represent 95% Confidence Intervals",
+       x = "Lag Period (Years)",
+       y = "Obesity Coefficient (Beta)") +
+  theme_minimal()
+
 ### The trends in obesity & cancer is
 ## Extremely strong positive correlations in groups 40-44 & <40 
 ## Moderate to strong positive correlation in group 45-49, concerned about the smaller size
