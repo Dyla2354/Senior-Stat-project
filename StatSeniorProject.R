@@ -1339,6 +1339,35 @@ ggplot(data_check_full, aes(x = NHANES_cycle, y = Age_group, fill = total_n)) +
     y = "Age Group"
   )
 
+ggplot(all_data, aes(x = factor(NHANES_cycle), y = BMI, fill = factor(NHANES_cycle))) +
+  geom_boxplot(outlier.size = 0.5, alpha = 0.7) +
+  scale_fill_viridis_d(option = "mako") + 
+  scale_y_continuous(breaks = seq(10, 70, by = 10)) + 
+  theme_minimal() +
+  labs(
+    title = "BMI Distribution Trends Across NHANES Cycles",
+    x = "Survey Cycle",
+    y = "BMI (kg/m²)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  )
+
+
+ggplot(all_data, aes(x = Age_group, y = BMI, fill = Age_group)) +
+  geom_boxplot(outlier.size = 0.5, alpha = 0.7, width = 0.6) +
+  scale_y_continuous(breaks = seq(10, 70, by = 10)) + 
+  scale_fill_viridis_d(option = "viridis") + 
+  theme_minimal() +
+  labs(
+    title = "BMI Distribution by Age Group",
+    subtitle = "Aggregated across all NHANES cycles",
+    x = "Age Category",
+    y = "BMI (kg/m²)"
+  ) +
+  theme(legend.position = "none")
+
 
 # 5. Single Survey Design Object
 options(survey.lonely.psu = "adjust")
